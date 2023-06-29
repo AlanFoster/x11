@@ -51,3 +51,11 @@ All man pages
 ```
 man -a sock
 ```
+
+### gdb/pwndbg
+
+Breakpoint with: `int3`
+
+Commands:
+- `reg`
+- `reg eflags`
