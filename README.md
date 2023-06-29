@@ -10,7 +10,7 @@ make
 
 # Run the application
 ./main
-strace ./main
+make && strace ./main; echo "exit code: $?"
 ```
 
 ## Notes
