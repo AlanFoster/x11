@@ -57,5 +57,6 @@ man -a sock
 Breakpoint with: `int3`
 
 Commands:
-- `reg`
+- `context` - View current state
+- `reg` - View registers
 - `reg eflags`

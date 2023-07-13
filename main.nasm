@@ -6,6 +6,7 @@ CPU X64
 ; System call IDs - values from unistd.h - /usr/include/x86_64-linux-gnu/asm/unistd_64.h
 %define SYSCALL_WRITE 1
 %define SYSCALL_SOCKET 41
+%define SYSCALL_CONNECT 42
 %define SYSCALL_EXIT 60
 
 ; File descriptors
@@ -19,6 +20,15 @@ CPU X64
 ; Socket constants
 %define AF_UNIX 1
 %define SOCK_STREAM 1
+
+; From sys/un.h - sizeof(struct sockaddr_un addr)
+%define UNIX_PATH_MAX 108
+%define SIZEOF_SUN_FAMILY 2
+%define SIZEOF_SOCK_ADDR_UN (SIZEOF_SUN_FAMILY + UNIX_PATH_MAX)
+
+section .rodata
+sun_path: db "/tmp/.X11-unix/X0", 0
+static sun_path:data
 
 section .text
 
@@ -57,6 +67,8 @@ static x11_connect_to_server:function ; metadata for strace -k
   ; Preamble
   push rbp
   mov rbp, rsp
+  ; TODO: Use byte align helper
+  sub rsp, SIZEOF_SOCK_ADDR_UN + 2 ; Reserve space for sock_addr_un
 
   ; Open socket
   mov rax, SYSCALL_SOCKET
@@ -70,7 +82,39 @@ static x11_connect_to_server:function ; metadata for strace -k
 
   mov rdi, rax ; Store socket fd in rdi for the remainder of the function
 
+  ; Connect sys call requires a struct, example for unix sock address:
+  ; const sockaddr_un addr = {
+  ;   .sun_family = AF_UNIX, ; 1 - unix domain sockets
+  ;   .sun_path = "/tmp/.X11-unix/X0"
+  ; }
+  ; const in res = connect(x11_socket_fd, (const struct sockaddr*) &addr, sizeof(addr));
+
+  mov WORD [rsp], AF_UNIX ; Set sockaddr_un.sun_family to AF_UNIX
+  ; Fill sockaddr_un.sun_path with "/tmp/.X11-unix/x0"
+  lea rsi, sun_path ; Set source for memcpy
+  mov r12, rdi ; Save socket descriptor in `rdi` in `r12`
+  lea rdi, [rsp + 2] ; Set the destination for string copy to the stackpointer after the AF_UNIX
+  cld ; Clear the DF flag to ensure the copy is done forwards
+  mov ecx, 19 ; Length is 19 with the null terminator
+  rep movsb ; Rep = Repeat string operation prefix, byte move
+
+  ; int3
+
+  ; Call sys connect: connect(2)
+  mov rax, SYSCALL_CONNECT
+  mov rdi, r12 ; file descriptor
+  lea rsi, [rsp] ; Path to unix socket
+  mov rdx, SIZEOF_SOCK_ADDR_UN ; sizeof(addr)
+  syscall
+
+  cmp rax, 0
+  jne die
+
+  int3
+  mov rax, rdi ; Set return value to socket fd
+
   ; Postamble
+  add rsp, SIZEOF_SOCK_ADDR_UN + 2 ; Space for sock_addr_un
   pop rbp
   ret
 
