@@ -20,7 +20,26 @@ CPU X64
 
 ; Socket constants
 %define AF_UNIX 1
+%define AF_INET 2
 %define SOCK_STREAM 1
+
+; From #include <netinet/in.h> -  sizeof(struct sockaddr_in addr)
+; #include <netinet/in.h>
+; struct sockaddr_in {
+;      short            sin_family;   // e.g. AF_INET
+;      unsigned short   sin_port;     // e.g. htons(3490)
+;      struct in_addr   sin_addr;     // see struct in_addr, below
+;      char             sin_zero[8];  // zero this if you want to
+;  };
+;
+; struct in_addr {
+;     unsigned long s_addr;  // load with inet_aton()
+; };
+%define SIZEOF_SOCKADDR_IN_SIN_FAMILY 2
+%define SIZEOF_SOCKADDR_IN_SIN_PORT 2
+%define SIZEOF_SOCKADDR_IN_SIN_ADDR 4
+%define SIZEOF_SOCKADDR_IN_SIN_ZERO 8
+%define SIZEOF_SOCKADDR_IN (SIZEOF_SOCKADDR_IN_SIN_FAMILY + SIZEOF_SOCKADDR_IN_SIN_PORT + SIZEOF_SOCKADDR_IN_SIN_ADDR + SIZEOF_SOCKADDR_IN_SIN_ZERO)
 
 ; From sys/un.h - sizeof(struct sockaddr_un addr)
 %define UNIX_PATH_MAX 108
@@ -29,7 +48,7 @@ CPU X64
 ;    sa_family_t sun_family;             /* AF_UNIX */
 ;    char       sun_path[108];           /* Pathname */
 ; };
-%define SIZEOF_SOCK_ADDR_UN (SIZEOF_SUN_FAMILY + UNIX_PATH_MAX)
+%define SIZEOF_SOCKADDR_UN (SIZEOF_SUN_FAMILY + UNIX_PATH_MAX)
 %define MAXIMUM_EXPECTED_X11_HANDSHAKE_SIZE (1 << 15) ; From the author, 14kb response so 32kb to safe. This isn't a scalable solution though, as the server could return more.
 ; typedef struct {
 ;   u8 order;
@@ -134,48 +153,93 @@ static x11_connect_to_server:function ; metadata for strace -k
   push rbp
   mov rbp, rsp
   ; TODO: Use byte align helper
-  sub rsp, SIZEOF_SOCK_ADDR_UN + 2 ; Reserve space for sock_addr_un
+  sub rsp, SIZEOF_SOCKADDR_UN + 2 ; Reserve space for sockaddr_un
 
   lea rdi, [message_connect_to_server]
   mov rsi, message_connect_to_server_length
   call print_message
 
-  ; Open socket
-  mov rax, SYSCALL_SOCKET
-  mov rdi, AF_UNIX ; Unix socket
-  mov rsi, SOCK_STREAM ; Stream orientated
-  mov rdx, 0 ; Automatic protocol
-  syscall
+  ; Open socket - over TCP if we're in debug mode, otherwise AF_UNIX socket
+  %ifdef DEBUG
+    mov rax, SYSCALL_SOCKET
+    mov rdi, AF_INET ; AF_INET socket - we'll connect over TCP
+    mov rsi, SOCK_STREAM ; Stream orientated
+    mov rdx, 0 ; Automatic protocol
+    syscall
+  %else
+    mov rax, SYSCALL_SOCKET
+    mov rdi, AF_UNIX ; Unix socket
+    mov rsi, SOCK_STREAM ; Stream orientated
+    mov rdx, 0 ; Automatic protocol
+    syscall
+  %endif
 
   cmp rax, 0
   jle die
 
   mov rdi, rax ; Store socket fd in rdi for the remainder of the function
 
-  ; Connect sys call requires a struct, example for unix sock address:
-  ; const sockaddr_un addr = {
-  ;   .sun_family = AF_UNIX, ; 1 - unix domain sockets
-  ;   .sun_path = "/tmp/.X11-unix/X0"
-  ; }
-  ; const in res = connect(x11_socket_fd, (const struct sockaddr*) &addr, sizeof(addr));
+  ; Connect to TCP proxy if in debug mode, or connect to AF_UNIX
+  %ifdef DEBUG
+    ; connect sys call requires a struct, example for TCP sock address:
+    ; #include <netinet/in.h>
+    ; struct sockaddr_in {
+    ;      short            sin_family;   // e.g. AF_INET
+    ;      unsigned short   sin_port;     // e.g. htons(3490)
+    ;      struct in_addr   sin_addr;     // see struct in_addr, below
+    ;      char             sin_zero[8];  // zero this if you want to
+    ;  };
+    ;
+    ; struct in_addr {
+    ;     unsigned long s_addr;  // load with inet_aton()
+    ; };
+    ;
+    ; const struct sockaddr_in addr = {
+    ;    .sin_family = AF_INET,
+    ;    .sin_port = htons(6000),
+    ;    .sin_addr = {
+    ;        .s_addr = inet_addr("127.0.0.1"),
+    ;    },
+    ;    .sin_zero = 0
+    ; };
 
-  mov WORD [rsp], AF_UNIX ; Set sockaddr_un.sun_family to AF_UNIX
-  ; Fill sockaddr_un.sun_path with "/tmp/.X11-unix/x0"
-  lea rsi, sun_path ; Set source for memcpy
-  mov r12, rdi ; Save socket descriptor in `rdi` in `r12`
-  lea rdi, [rsp + 2] ; Set the destination for string copy to the stackpointer after the AF_UNIX
-  cld ; Clear the DF flag to ensure the copy is done forwards
-  mov ecx, sun_path_byte_size ; Length is 19 with the null terminator
-  rep movsb ; Rep = Repeat string operation prefix, byte move
+    int3
+    mov WORD [rsp], AF_INET ; .sin_family = AF_INET = 2
+    mov WORD [rsp + 2], 0x7017 ; .sin_port = htons(6000)
+    mov DWORD [rsp + 4], 0x0100007f ; .sin_addr.s_addr = htons("127.0.0.1")
+    mov DWORD [rsp + 8], 0 ; .sin_zero = 0
 
-  ; int3
+    ; Call sys connect: connect(2)
+    mov rax, SYSCALL_CONNECT
+    mov rdi, rdi ; socket file descriptor
+    lea rsi, [rsp] ; Path to AF_INET socket
+    mov rdx, SIZEOF_SOCKADDR_IN ; sizeof(addr)
+    syscall
+  %else
+    ; Connect sys call requires a struct, example for unix sock address:
+    ;
+    ; const sockaddr_un addr = {
+    ;   .sun_family = AF_UNIX, // 1 - unix domain sockets
+    ;   .sun_path = "/tmp/.X11-unix/X0"
+    ; }
+    ; const in res = connect(x11_socket_fd, (const struct sockaddr*) &addr, sizeof(addr));
 
-  ; Call sys connect: connect(2)
-  mov rax, SYSCALL_CONNECT
-  mov rdi, r12 ; file descriptor
-  lea rsi, [rsp] ; Path to unix socket
-  mov rdx, SIZEOF_SOCK_ADDR_UN ; sizeof(addr)
-  syscall
+    mov WORD [rsp], AF_UNIX ; Set sockaddr_un.sun_family to AF_UNIX
+    ; Fill sockaddr_un.sun_path with "/tmp/.X11-unix/x0"
+    lea rsi, sun_path ; Set source for memcpy
+    mov r12, rdi ; Save socket descriptor in `rdi` in `r12`
+    lea rdi, [rsp + 2] ; Set the destination for string copy to the stackpointer after the AF_UNIX
+    cld ; Clear the DF flag to ensure the copy is done forwards
+    mov ecx, sun_path_byte_size ; Length is 19 with the null terminator
+    rep movsb ; Rep = Repeat string operation prefix, byte move
+
+    ; Call sys connect: connect(2)
+    mov rax, SYSCALL_CONNECT
+    mov rdi, r12 ; socket file descriptor
+    lea rsi, [rsp] ; Path to unix socket
+    mov rdx, SIZEOF_SOCKADDR_UN ; sizeof(addr)
+    syscall
+  %endif
 
   cmp rax, 0
   jne die
@@ -183,7 +247,7 @@ static x11_connect_to_server:function ; metadata for strace -k
   mov rax, rdi ; Set return value to socket fd
 
   ; Postamble
-  add rsp, SIZEOF_SOCK_ADDR_UN + 2 ; Space for sock_addr_un
+  add rsp, SIZEOF_SOCKADDR_UN + 2 ; Space for sockaddr_un plus alignment
   pop rbp
   ret
 
