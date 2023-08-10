@@ -203,7 +203,6 @@ static x11_connect_to_server:function ; metadata for strace -k
     ;    .sin_zero = 0
     ; };
 
-    int3
     mov WORD [rsp], AF_INET ; .sin_family = AF_INET = 2
     mov WORD [rsp + 2], 0x7017 ; .sin_port = htons(6000)
     mov DWORD [rsp + 4], 0x0100007f ; .sin_addr.s_addr = htons("127.0.0.1")
@@ -248,6 +247,188 @@ static x11_connect_to_server:function ; metadata for strace -k
 
   ; Postamble
   add rsp, SIZEOF_SOCKADDR_UN + 2 ; Space for sockaddr_un plus alignment
+  pop rbp
+  ret
+
+
+; Increment the global id
+; @return The new id
+x11_next_id:
+static x11_next_id:function
+  push rbp
+  mov rbp, rsp
+
+  mov eax, DWORD [id] ; Load the current value into the return eax register
+
+  mov edi, DWORD [id_base] ; Load global id_base
+  mov edx, DWORD [id_mask] ; Load global id_mask
+
+  ; Return idmask & id | id_base
+  and eax, edx
+  or eax, edi
+
+  add DWORD [id], 1 ; increment ID
+
+  pop rbp
+  ret
+
+; Open a font on the server side
+; @param rdi The socket file descriptor
+; @param esi The font id
+x11_open_font:
+static x11_open_font:function
+  push rbp
+  mov rbp, rsp
+
+  %define OPEN_FONT_NAME_BYTE_COUNT 5
+  %define OPEN_FONT_PADDING ((4 - (OPEN_FONT_NAME_BYTE_COUNT % 4)) % 4)
+  %define OPEN_FONT_PACKET_U32_COUNT (3 + (OPEN_FONT_NAME_BYTE_COUNT + OPEN_FONT_PADDING) / 4)
+  %define X11_OP_REQ_OPEN_FONT 0x2d
+
+  sub rsp, 6 * 8
+  mov DWORD [rsp + 0 * 4], X11_OP_REQ_OPEN_FONT | (OPEN_FONT_PACKET_U32_COUNT << 16)
+  mov DWORD [rsp + 1 * 4], esi
+  mov DWORD [rsp + 2 * 4], OPEN_FONT_NAME_BYTE_COUNT
+  mov BYTE  [rsp + 3*4 + 0], 'f'
+  mov BYTE  [rsp + 3*4 + 1], 'i'
+  mov BYTE  [rsp + 3*4 + 2], 'x'
+  mov BYTE  [rsp + 3*4 + 3], 'e'
+  mov BYTE  [rsp + 3*4 + 4], 'd'
+
+  mov rax, SYSCALL_WRITE
+  mov rdi, rdi
+  lea rsi, [rsp]
+  mov rdx, OPEN_FONT_PACKET_U32_COUNT*4
+  syscall
+
+  cmp rax, OPEN_FONT_PACKET_U32_COUNT*4
+  jnz die
+
+  add rsp, 6 * 8
+
+  pop rbp
+  ret
+
+; Create an X11 graphical context
+; @param rdi The socket file descriptor
+; @param esi The graphical context id
+; @param edx The window root id
+; @param ecx the font id
+x11_create_graphical_context:
+static x11_create_graphical_context:function
+  push rbp
+  mov rbp, rsp
+
+  sub rsp, 8*8
+
+  %define X11_OP_REQ_CREATE_GC 0x37
+  %define X11_FLAG_GC_BG 0x00000004
+  %define X11_FLAG_GC_FG 0x00000008
+  %define X11_FLAG_GC_FONT 0x00004000
+  %define X11_FLAG_GC_EXPOSE 0x00010000
+
+  %define CREATE_GC_FLAGS X11_FLAG_GC_BG | X11_FLAG_GC_FG | X11_FLAG_GC_FONT
+  %define CREATE_GC_PACKET_FLAG_COUNT 3
+  %define CREATE_GC_PACKET_U32_COUNT (4 + CREATE_GC_PACKET_FLAG_COUNT)
+  %define MY_COLOR_RGB 0x0000ffff
+
+  mov DWORD [rsp + 0*4], X11_OP_REQ_CREATE_GC | (CREATE_GC_PACKET_U32_COUNT<<16)
+  mov DWORD [rsp + 1*4], esi
+  mov DWORD [rsp + 2*4], edx
+  mov DWORD [rsp + 3*4], CREATE_GC_FLAGS
+  mov DWORD [rsp + 4*4], MY_COLOR_RGB
+  mov DWORD [rsp + 5*4], 0
+  mov DWORD [rsp + 6*4], ecx
+
+  mov rax, SYSCALL_WRITE
+  mov rdi, rdi
+  lea rsi, [rsp]
+  mov rdx, CREATE_GC_PACKET_U32_COUNT*4
+  syscall
+
+  cmp rax, CREATE_GC_PACKET_U32_COUNT*4
+  jnz die
+
+  add rsp, 8*8
+
+  pop rbp
+  ret
+
+; Create the X11 window.
+; @param rdi The socket file descriptor.
+; @param esi The new window id.
+; @param edx The window root id.
+; @param ecx The root visual id.
+; @param r8d Packed x and y.
+; @param r9d Packed w and h.
+x11_create_window:
+static x11_create_window:function
+  push rbp
+  mov rbp, rsp
+
+  %define X11_OP_REQ_CREATE_WINDOW 0x01
+  %define X11_FLAG_WIN_BG_COLOR 0x00000002
+  %define X11_EVENT_FLAG_KEY_RELEASE 0x0002
+  %define X11_EVENT_FLAG_EXPOSURE 0x8000
+  %define X11_FLAG_WIN_EVENT 0x00000800
+
+  %define CREATE_WINDOW_FLAG_COUNT 2
+  %define CREATE_WINDOW_PACKET_U32_COUNT (8 + CREATE_WINDOW_FLAG_COUNT)
+  %define CREATE_WINDOW_BORDER 1
+  %define CREATE_WINDOW_GROUP 1
+
+  sub rsp, 12*8
+
+  mov DWORD [rsp + 0*4], X11_OP_REQ_CREATE_WINDOW | (CREATE_WINDOW_PACKET_U32_COUNT << 16)
+  mov DWORD [rsp + 1*4], esi
+  mov DWORD [rsp + 2*4], edx
+  mov DWORD [rsp + 3*4], r8d
+  mov DWORD [rsp + 4*4], r9d
+  mov DWORD [rsp + 5*4], CREATE_WINDOW_GROUP | (CREATE_WINDOW_BORDER << 16)
+  mov DWORD [rsp + 6*4], ecx
+  mov DWORD [rsp + 7*4], X11_FLAG_WIN_BG_COLOR | X11_FLAG_WIN_EVENT
+  mov DWORD [rsp + 8*4], 0
+  mov DWORD [rsp + 9*4], X11_EVENT_FLAG_KEY_RELEASE | X11_EVENT_FLAG_EXPOSURE
+
+  mov rax, SYSCALL_WRITE
+  mov rdi, rdi
+  lea rsi, [rsp]
+  mov rdx, CREATE_WINDOW_PACKET_U32_COUNT*4
+  syscall
+
+  cmp rax, CREATE_WINDOW_PACKET_U32_COUNT*4
+  jnz die
+
+  add rsp, 12*8
+
+  pop rbp
+  ret
+
+; Map a X11 window.
+; @param rdi The socket file descriptor.
+; @param esi The window id.
+x11_map_window:
+static x11_map_window:function
+  push rbp
+  mov rbp, rsp
+
+  sub rsp, 16
+
+  %define X11_OP_REQ_MAP_WINDOW 0x08
+  mov DWORD [rsp + 0*4], X11_OP_REQ_MAP_WINDOW | (2<<16)
+  mov DWORD [rsp + 1*4], esi
+
+  mov rax, SYSCALL_WRITE
+  mov rdi, rdi
+  lea rsi, [rsp]
+  mov rdx, 2*4
+  syscall
+
+  cmp rax, 2*4
+  jnz die
+
+  add rsp, 16
+
   pop rbp
   ret
 
@@ -358,7 +539,48 @@ _start:
   call print_startup_message
 
   call x11_connect_to_server
+  mov r15, rax ; Store the socket file descriptor in r15
+
+  mov rdi, rax
   call x11_send_handshake
+
+  mov r12d, eax ; Store uint32 window root id in r12
+
+  call x11_next_id
+  mov r13d, eax ; Store the gc_id in r13
+
+  call x11_next_id
+  mov r14d, eax ; Store the font_id in r14
+
+  mov rdi, r15
+  mov esi, r14d
+  call x11_open_font
+
+  mov rdi, r15
+  mov esi, r13d
+  mov edx, r12d
+  mov ecx, r14d
+  call x11_create_graphical_context
+
+  call x11_next_id
+  mov ebx, eax ; Store the window id in ebx
+
+  mov rdi, r15 ; socket fd
+  mov esi, eax
+  mov edx, r12d
+  mov ecx, [root_visual_id]
+  mov r8d, 200 | (200 << 16) ; x and y are 200
+  %define WINDOW_W 800
+  %define WINDOW_H 600
+  mov r9d, WINDOW_W | (WINDOW_H << 16)
+  call x11_create_window
+
+  mov rdi, r15 ; socket id
+  mov esi, ebx
+  call x11_map_window
+
+  mov rdi, r15 ; socket fd
+  call set_fd_non_blocking
 
   ; Exit
   mov RAX, SYSCALL_EXIT
