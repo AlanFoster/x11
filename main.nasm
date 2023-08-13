@@ -6,9 +6,11 @@ CPU X64
 ; System call IDs - values from unistd.h - /usr/include/x86_64-linux-gnu/asm/unistd_64.h
 %define SYSCALL_READ 0
 %define SYSCALL_WRITE 1
+%define SYSCALL_POLL 7
 %define SYSCALL_SOCKET 41
 %define SYSCALL_CONNECT 42
 %define SYSCALL_EXIT 60
+%define SYSCALL_FCNTL 72
 
 ; File descriptors
 %define STDIN 0
@@ -74,6 +76,10 @@ static message_connect_to_server:data
 message_handshake: db 'starting handshake...', NEWLINE, 0
 message_handshake_length: equ $ - message_handshake
 static message_handshake:data
+
+string_to_render: db 'Hello world from x11 :)'
+string_to_render_size: equ $ - string_to_render
+static string_to_render_size:data
 
 section .data
 id: dd 0
@@ -432,6 +438,209 @@ static x11_map_window:function
   pop rbp
   ret
 
+; Set a file descriptor in non-blocking mode
+; @param rdi The file descriptor
+set_fd_non_blocking:
+static set_fd_non_blocking:function
+  push rbp
+  mov rbp, rsp
+
+  %define F_GETFL 3
+  %define F_SETFL 4
+
+  %define O_NONBLOCK 2048
+
+  ; Get the current file descriptor flags
+  mov rax, SYSCALL_FCNTL
+  mov rdi, rdi
+  mov rsi, F_GETFL
+  mov rdx, 0
+  syscall
+
+  cmp rax, 0
+  jl die
+
+  ; Bitwise or the current file status with O_NONBLOCK
+  mov rdx, rax
+  or rdx, O_NONBLOCK
+
+  ; Set the new value
+  mov rax, SYSCALL_FCNTL
+  mov rdi, rdi
+  mov rsi, F_SETFL
+  mov rdx, rdx
+  syscall
+
+  cmp rax, 0
+  jl die
+
+  pop rbp
+  ret
+
+; Poll indefinitely messages from the x11 server with poll(2)
+; @param rdi The socket file descriptor
+; @param esi The window id
+; @param edx The gc id
+poll_messages:
+static poll_messages:function
+  push rbp
+  mov rbp, rsp
+
+  sub rsp, 32
+
+  %define POLLIN 0x001
+  %define POLLPRI 0x002
+  %define POLLOUT 0x004
+  %define POLLERR 0x008
+  %define POLLHUP 0x010
+  %define POLLNVAL 0x020
+
+  ; struct pollfd {
+  ;    int   fd;         /* file descriptor */
+  ;    short events;     /* requested events */
+  ;    short revents;    /* returned events */
+  ; };
+  mov DWORD [rsp + 0*4], edi ; file descriptor
+  mov DWORD [rsp + 1*4], POLLIN ; Requested events
+  mov DWORD [rsp + 2*4], 0 ; revents
+
+  mov DWORD [rsp + 16], esi ; Window ID
+  mov DWORD [rsp + 20], edx ; graphical context ID
+  mov BYTE [rsp + 24], 0 ; Exposed (boolean)
+
+  .loop:
+    mov rax, SYSCALL_POLL
+    lea rdi, [rsp] ; file descriptors
+    mov rsi, 1 ; one file descriptor
+    mov rdx, -1 ; No timeout, i.e. don't block
+    syscall
+
+    cmp rax, 0
+    jle die
+
+    cmp DWORD [rsp + 2*4], POLLERR
+    je die
+
+    cmp DWORD [rsp + 2*4], POLLHUP
+    je die
+
+    mov rdi, [rsp + 0*4]
+    call x11_read_reply ; X11 reply code will be in al
+
+    %define X11_EVENT_EXPOSURE 0xc
+    cmp eax, X11_EVENT_EXPOSURE
+    jnz .received_exposed_event
+    .received_exposed_event:
+      mov BYTE [rsp + 24], 1 ; Mark as exposed
+    .received_other_event:
+      nop
+
+    cmp BYTE [rsp + 24], 1 ; If exposed?
+    jnz .loop
+
+    .draw_text:
+      mov rdi, [rsp + 0 * 4] ; socket fd
+      lea rsi, [string_to_render]
+      mov edx, string_to_render_size
+      mov ecx, [rsp + 16] ; Window id
+      mov r8d, [rsp + 20] ; graphical context id
+      mov r9d, 100 ; x
+      shl r9d, 16
+      or r9d, 100 ; y
+      call x11_draw_text
+    jmp .loop
+
+  add rsp, 32
+  pop rbp
+  ret
+
+; Draw text in an X11 window with server-side text rendering
+; @param rdi The socket file descriptor
+; @param rsi The text string
+; @param edx The text string length in bytes
+; @param ecx The window id
+; @param r8d The grahical context id
+; @r9d Packed x and y
+x11_draw_text:
+static x11_draw_text:function
+  push rbp
+  mov rbp, rsp
+  sub rsp, 1024
+
+  mov DWORD [rsp + 1*4], ecx ; Store the window ID directly in the packet data on the stack
+  mov DWORD [rsp + 2*4], r8d ; Store the graphical context id directly in the packet data on the stack
+  mov DWORD [rsp + 3*4], r9d ; Store x,y
+
+  mov r8d, edx ; Store the length of the string in r8d since edx is overwritten
+  mov QWORD [rsp + 1024 - 8], rdi ; Store the socket file descriptor on the stack to free the register
+
+  ; Compute padding and packet u32 count
+  mov eax, edx ; Put dividend in eax
+  mov ecx, 4 ; Divisor
+  cdq ; Sign extend
+  idiv ecx ; Compute 'eax / ecx', and put the modulo in edx
+  neg edx
+  and edx, 3
+  mov r9d, edx ; Padding in r9
+
+  mov eax, r8d
+  add eax, r9d
+  shr eax, 2 ; Compute eax /= 4
+  add eax, 4 ; eax = packet u32 count
+
+  %define X11_OP_REQ_IMAGE_TEXT8 0x4c
+  mov DWORD [rsp + 0 * 4], r8d
+  shl DWORD [rsp + 0 * 4], 8
+  or DWORD [rsp + 0*4], X11_OP_REQ_IMAGE_TEXT8
+  mov ecx, eax
+  shl ecx, 16
+  or [rsp + 0*4], ecx
+
+  ; Copy the text string into the packet data on the stack
+  mov rsi, rsi ; Source string in rsi
+  lea rdi, [rsp + 4*4] ; Destination
+  cld ; Move forward
+  mov ecx, r8d ; string length
+  rep movsb ; copy
+
+  mov rdx, rax ; Packet u32 count
+  imul rdx, 4
+  mov RAX, SYSCALL_WRITE
+  mov rdi, QWORD [rsp + 1024 - 8] ; fd
+  lea rsi, [rsp]
+  syscall
+
+  cmp rax, rdx
+  jnz die
+
+  add rsp, 1024
+  pop rbp
+  ret
+
+
+; Read the x11 server reply
+; @return the message code in al
+x11_read_reply:
+static x11_read_reply:function
+  push rbp
+  mov rbp, rsp
+  sub rsp, 32
+
+  mov rax, SYSCALL_READ ; Read the x11 response
+  mov rdi, rdi
+  lea rsi, [rsp]
+  mov rdx, 32
+  syscall
+
+  cmp rax, 1
+  jle die
+
+  mov al, BYTE [rsp]
+
+  add rsp, 32
+  pop rbp
+  ret
+
 ; Send the x11 handshake to the X11 server, and read the returned system information
 ; @param rdi The socket file descriptor
 ; @returns The window root id (uint32_t) in rax
@@ -581,6 +790,11 @@ _start:
 
   mov rdi, r15 ; socket fd
   call set_fd_non_blocking
+
+  mov rdi, r15 ; socket fd
+  mov esi, ebx ; Window id
+  mov edx, r13d ; graphical context id
+  call poll_messages
 
   ; Exit
   mov RAX, SYSCALL_EXIT
