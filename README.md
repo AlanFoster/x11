@@ -2,6 +2,8 @@
 
 Following along with https://gaultier.github.io/blog/x11_x64.html to make an x86-64 assembly by writing a GUI from scratch using X11
 
+![x11](images/x11.jpg)
+
 ## Building / Running
 
 ```
@@ -51,6 +53,8 @@ Running Socat to forward to the `AF_UNIX` X11 socket:
 ```
 socat tcp-listen:6000,reuseaddr,fork unix:/tmp/.X11-unix/X0
 ```
+
+![wireshark](images/x11.jpg)
 
 ### Man pages
 
