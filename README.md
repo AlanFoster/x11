@@ -54,7 +54,7 @@ Running Socat to forward to the `AF_UNIX` X11 socket:
 socat tcp-listen:6000,reuseaddr,fork unix:/tmp/.X11-unix/X0
 ```
 
-![wireshark](images/x11.png)
+![wireshark](images/wireshark.png)
 
 ### Man pages
 
